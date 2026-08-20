@@ -1,0 +1,91 @@
+name: Keep HOL Guard plugin-scanner PR current
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/sync-hol-guard-plugin-scanner.yml'
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hol-guard-plugin-scanner-upstream-sync
+  cancel-in-progress: false
+
+env:
+  TARGET_BRANCH: hol-guard-plugin-scanner-20260818
+  UPSTREAM_REPOSITORY: NousResearch/hermes-agent
+  EXPECTED_PATH: optional-skills/security/plugin-scanner/SKILL.md
+
+jobs:
+  sync:
+    if: github.repository == 'kantorcodes/hermes-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out trusted fork default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Refresh the single-file contribution on current upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin "${TARGET_BRANCH}"
+
+          remote_sha=$(git rev-parse "origin/${TARGET_BRANCH}")
+          contribution_file=$(mktemp)
+          git show "origin/${TARGET_BRANCH}:${EXPECTED_PATH}" > "${contribution_file}"
+
+          test -s "${contribution_file}"
+          grep -q '^name: plugin-scanner$' "${contribution_file}"
+          grep -q '^category: security$' "${contribution_file}"
+          grep -q 'Scanning runs locally and does not require Guard Cloud' "${contribution_file}"
+          if grep -Eiq 'auto[- ]?(install|register)|guard cloud (is|required)|execute the target' "${contribution_file}"; then
+            echo 'Contribution content crossed a prohibited safety boundary.' >&2
+            exit 1
+          fi
+
+          git checkout -B "${TARGET_BRANCH}" upstream/main
+          mkdir -p "$(dirname "${EXPECTED_PATH}")"
+          cp "${contribution_file}" "${EXPECTED_PATH}"
+          git add "${EXPECTED_PATH}"
+
+          if git diff --cached --quiet; then
+            echo 'Upstream already contains the exact contribution; no branch update is needed.'
+            exit 0
+          fi
+
+          changed_paths=$(git diff --cached --name-only)
+          if [ "${changed_paths}" != "${EXPECTED_PATH}" ]; then
+            echo "Unexpected changed paths: ${changed_paths}" >&2
+            exit 1
+          fi
+
+          git commit -m 'chore: keep plugin-scanner contribution current'
+          git push \
+            --force-with-lease="refs/heads/${TARGET_BRANCH}:${remote_sha}" \
+            origin "HEAD:refs/heads/${TARGET_BRANCH}"
+
+      - name: Verify the refreshed branch remains one-file scoped
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags upstream main
+          changed_paths=$(git diff --name-only upstream/main...HEAD)
+          if [ "${changed_paths}" != "${EXPECTED_PATH}" ]; then
+            echo "Expected only ${EXPECTED_PATH}; found: ${changed_paths}" >&2
+            exit 1
+          fi
